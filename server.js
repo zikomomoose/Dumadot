@@ -6,6 +6,7 @@ import fs from "node:fs";
 import cookieParser from "cookie-parser";
 import { ensureBotTables, enqueueJob, startWorker, heartbeat } from "./lib/bots.js";
 import { ensureAuthTables, attachAuthRoutes, requireAuth } from "./lib/auth.js";
+import { attachAgentApi } from "./lib/agentApi.js";
 
 const BOT_NAME = "dumadot";
 
@@ -28,6 +29,26 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: useSsl 
 // route below to that person's own data.
 app.get("/api/health",(req,res)=>res.json({ok:true,app:"Dumadot",version:"3.0.0",time:new Date().toISOString()}));
 attachAuthRoutes(app, pool, { appName: "Dumadot" });
+// Dobydot (personal-assistant agent) drives drafting/publishing through this
+// key-protected surface; it must sit before the login wall. It reuses the
+// same createDraft/publishPost the dashboard buttons call.
+attachAgentApi(app, pool, {
+  name: "Duma",
+  draft: async (user, p) => {
+    const topic = [p.topic || "", p.instructions ? `Revision notes from the author - apply them: ${p.instructions}` : "", p.previous ? `Previous draft being revised:\n${p.previous}` : ""].filter(Boolean).join("\n\n");
+    const d = await createDraft(user.id, topic);
+    return { handle: String(d.id), title: d.topic, body: d.content, notes: `Pillar: ${d.pillar || "-"} · quality ${d.quality?.score ?? "?"}/100` };
+  },
+  publish: async (user, handle) => {
+    await markApproved(user.id, Number(handle));
+    await publishPost(user.id, Number(handle));
+    return { summary: "Posted to LinkedIn." };
+  },
+  discard: async (user, handle) => {
+    await dbRun("DELETE FROM posts WHERE id=? AND user_id=? AND status!='published'", [Number(handle), user.id]);
+    return { ok: true };
+  },
+});
 app.use(requireAuth(pool));
 // no-cache (not no-store) on the HTML shell: the browser still revalidates
 // via ETag and gets a fast 304 when nothing changed, but a real deploy is
